@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -350,6 +351,92 @@ int apply_flirt(const std::string& version) {
 }
 
 // ---------------------------------------------------------------------------
+// version-robust fallback: when the exact rustc version cannot be read from the
+// binary (stripped / unknown nightly commit not in the table), recover anyway by
+// applying FLIRT for ALL known versions (byte-precise matching means only the
+// binary's actual version fires) and then pinning the version by matching the
+// recovered std names against each version's type-DB function-name set.
+// ---------------------------------------------------------------------------
+
+// Collects basenames matching a pattern in a directory (drops the extension for
+// .json type-DB version files).
+struct name_collector_t : public file_enumerator_t {
+    std::vector<std::string> names;
+    std::string strip_ext;  // if set, remove this suffix
+    int visit_file(const char* file) override {
+        std::string f(file);
+        size_t slash = f.find_last_of("/\\");
+        std::string base = slash == std::string::npos ? f : f.substr(slash + 1);
+        if (!strip_ext.empty() && base.size() > strip_ext.size() &&
+            base.compare(base.size() - strip_ext.size(), strip_ext.size(), strip_ext) == 0) {
+            base = base.substr(0, base.size() - strip_ext.size());
+        }
+        names.push_back(base);
+        return 0;
+    }
+};
+
+std::vector<std::string> list_db_versions() {
+    name_collector_t coll;
+    coll.strip_ext = ".json";
+    char answer[1024];
+    std::string dir = data_dir() + "/type_db";
+    enumerate_files(answer, sizeof(answer), dir.c_str(), "*.json", coll);
+    return coll.names;
+}
+
+int apply_all_flirt() {
+    int planned = 0;
+    qstring proc = inf_get_procname();
+    std::string subdir = (proc == "metapc" || proc.empty()) ? "pc" : std::string(proc.c_str());
+    std::string sigdir = std::string(idadir(SIG_SUBDIR)) + "/" + subdir;
+    const char* opts[] = {"3", "2", "1", "0"};
+    for (const auto& ver : list_db_versions()) {
+        for (const char* opt : opts) {
+            std::string src = data_dir() + "/flirt_sigs/" + ver + "-O" + opt + ".sig";
+            if (!file_readable(src)) continue;
+            std::string sig_name = "oxi_flirt_sigs_" + ver + "_O" + opt + ".sig";
+            std::string dst = sigdir + "/" + sig_name;
+            if (!file_readable(dst) && !copy_file(src, dst)) continue;  // stage once, then reuse
+            if (plan_to_apply_idasgn(sig_name.c_str()) != 0) ++planned;
+        }
+    }
+    return planned;
+}
+
+std::set<std::string> collect_recovered_names() {
+    std::set<std::string> out;
+    size_t n = get_func_qty();
+    for (size_t i = 0; i < n; ++i) {
+        func_t* f = getn_func(i);
+        if (f == nullptr) continue;
+        qstring nm;
+        if (get_func_name(&nm, f->start_ea) <= 0) continue;
+        out.insert(oxi::demangle(nm.c_str()));
+    }
+    return out;
+}
+
+std::optional<std::string> pin_version_by_overlap() {
+    std::set<std::string> recovered = collect_recovered_names();
+    std::vector<std::string> versions = list_db_versions();
+    auto names_for = [&](const std::string& v) -> std::vector<std::string> {
+        std::string p = type_db_path(v);
+        if (!file_readable(p)) return {};
+        try {
+            return oxi::TypeDB::load_function_names(p);
+        } catch (...) {
+            return {};
+        }
+    };
+    auto [ver, overlap] = oxi::pick_version_by_overlap(recovered, versions, names_for);
+    if (ver.has_value() && overlap > 0) {
+        msg("[oxidizer] pinned rustc version by name overlap: %s (%d std matches)\n", ver->c_str(), overlap);
+    }
+    return ver;
+}
+
+// ---------------------------------------------------------------------------
 // orchestration
 // ---------------------------------------------------------------------------
 
@@ -394,8 +481,9 @@ void run_recovery(const std::optional<std::string>& version, bool interactive, i
 // Interactive path: plan FLIRT, force it to apply, then recover -- all in one go.
 void run_pipeline_interactive() {
     std::optional<std::string> version = detect_version();
-    int flirt = version.has_value() ? apply_flirt(*version) : 0;
+    int flirt = version.has_value() ? apply_flirt(*version) : apply_all_flirt();
     if (flirt > 0) auto_wait();  // force planned sigs to apply before recovery
+    if (!version.has_value()) version = pin_version_by_overlap();  // robust fallback
     run_recovery(version, /*interactive=*/true, flirt);
 }
 
@@ -419,6 +507,7 @@ struct oxidizer_ctx_t : public plugmod_t, public event_listener_t {
     //   * auto_empty_finally  -> run the recovery pass (names now present)
     bool flirt_planned = false;
     bool recovered = false;
+    bool fallback = false;  // version unknown -> applied all-versions FLIRT, pin later
     int flirt_count = 0;
     std::optional<std::string> version;
 
@@ -445,15 +534,23 @@ struct oxidizer_ctx_t : public plugmod_t, public event_listener_t {
                     flirt_count = apply_flirt(*version);  // plan only; IDA applies next pass
                     msg("[oxidizer] detected rustc %s; planned %d FLIRT file(s)\n",
                         version->c_str(), flirt_count);
+                } else {
+                    // Unknown version: apply ALL versions' FLIRT (only the matching
+                    // one fires); the exact version is pinned later by name overlap.
+                    fallback = true;
+                    flirt_count = apply_all_flirt();
+                    msg("[oxidizer] no rustc version string; planned %d FLIRT file(s) across all versions\n",
+                        flirt_count);
                 }
                 // If there is no FLIRT to wait for, recover immediately.
                 if (flirt_count == 0) do_recover();
             }
         } else if (code == idb_event::auto_empty_finally) {
             // Definitive end of analysis: FLIRT is applied, names are present.
+            if (fallback && !version.has_value()) version = pin_version_by_overlap();
             do_recover();
         } else if (code == idb_event::closebase) {
-            flirt_planned = recovered = false;
+            flirt_planned = recovered = fallback = false;
             flirt_count = 0;
             version.reset();
         }

@@ -103,6 +103,11 @@ const char* idadir(const char* subdir);
 int plan_to_apply_idasgn(const char* fname);
 int auto_wait();
 bool qfileexist(const char* file);
+struct file_enumerator_t {
+    virtual int visit_file(const char* file) = 0;
+    virtual ~file_enumerator_t() {}
+};
+int enumerate_files(char* answer, size_t answer_size, const char* path, const char* fname, file_enumerator_t& fv);
 bool qgetenv(const char* varname, qstring* buf = nullptr);
 FILE* qfopen(const char* file, const char* mode);
 ssize_t qfread(FILE* fp, void* buf, size_t n);

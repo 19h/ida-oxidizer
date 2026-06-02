@@ -49,8 +49,9 @@ std::optional<std::string> find_version_in_strings(
                 auto v = commit_lookup(commit);
                 if (v.has_value()) return v;
             }
-            // A commit was found but unresolved -- stop here, like Oxidizer does.
-            return std::nullopt;
+            // Commit found but unresolved (e.g. a nightly not in the table):
+            // do NOT give up -- fall through and try the version-string patterns.
+            break;
         }
     }
     for (const auto& re : {kRustcRe, kRustDashRe}) {
@@ -176,6 +177,27 @@ std::pair<std::optional<std::string>, int> identify_version_by_flirt(
         vstr += std::to_string(best.version[i]);
     }
     return {vstr, best_count};
+}
+
+std::pair<std::optional<std::string>, int> pick_version_by_overlap(
+    const std::set<std::string>& recovered,
+    const std::vector<std::string>& candidate_versions,
+    const std::function<std::vector<std::string>(const std::string&)>& names_for_version) {
+    if (recovered.empty()) return {std::nullopt, 0};
+    std::optional<std::string> best;
+    int best_overlap = 0;
+    for (const auto& ver : candidate_versions) {
+        std::vector<std::string> names = names_for_version(ver);
+        int overlap = 0;
+        for (const auto& n : names) {
+            if (recovered.count(n)) ++overlap;
+        }
+        if (overlap > best_overlap) {
+            best_overlap = overlap;
+            best = ver;
+        }
+    }
+    return {best, best_overlap};
 }
 
 }  // namespace oxi

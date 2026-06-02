@@ -68,6 +68,17 @@ TypeDB TypeDB::from_json(const JsonValue& data, int arch_bits) {
     return db;
 }
 
+std::vector<std::string> TypeDB::load_function_names(const std::string& path) {
+    std::vector<std::string> names;
+    JsonValue data = json_parse_file(path);
+    const JsonValue& funcs = data["functions"];
+    for (const auto& f : funcs.items()) {
+        const JsonValue& nm = f["name"];
+        if (nm.is_string()) names.push_back(nm.as_string());
+    }
+    return names;
+}
+
 void TypeDB::load(const JsonValue& data) {
     const JsonValue& structs = data["structs"];
     for (const auto& s : structs.items()) {

@@ -10,6 +10,7 @@
 #include <iostream>
 #include <optional>
 #include <regex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -139,8 +140,17 @@ static void test_version_id(const std::string& repo) {
         CHECK(out.has_value() && *out == "1.70.0");
     }
     {
+        // Unresolved commit must NOT short-circuit: fall through to the version
+        // string pattern (robustness for nightlies not in the commit table).
         std::string h(40, 'b');
         auto out = find_version_in_strings({"/rustc/" + h + "/x", "rustc 1.50.0"},
+                                           [](const std::string&) -> std::optional<std::string> { return std::nullopt; });
+        CHECK(out.has_value() && *out == "1.50.0");
+    }
+    {
+        // Unresolved commit and no version string -> nullopt (caller falls back).
+        std::string h(40, 'c');
+        auto out = find_version_in_strings({"/rustc/" + h + "/x"},
                                            [](const std::string&) -> std::optional<std::string> { return std::nullopt; });
         CHECK(!out.has_value());
     }
@@ -173,6 +183,23 @@ static void test_version_id(const std::string& repo) {
         auto [ver, count] = identify_version_by_flirt({}, [](const std::string&) { return 0; });
         (void)count;
         CHECK(!ver.has_value());
+    }
+
+    // version pinning by type-DB function-name overlap (timing-independent)
+    {
+        std::set<std::string> recovered = {"core::ptr::drop_in_place<A>", "std::io::Read::read",
+                                           "alloc::vec::Vec::push"};
+        auto names_for = [](const std::string& v) -> std::vector<std::string> {
+            if (v == "1.80.0") return {"core::ptr::drop_in_place<A>", "std::io::Read::read", "x::y"};  // 2
+            if (v == "1.70.0") return {"alloc::vec::Vec::push", "z::w"};                                // 1
+            return {};
+        };
+        auto [ver, ov] = pick_version_by_overlap(recovered, {"1.70.0", "1.80.0"}, names_for);
+        CHECK(ver.has_value() && *ver == "1.80.0");
+        CHECK_EQ(ov, 2);
+        auto [none, z] = pick_version_by_overlap({}, {"1.80.0"}, names_for);
+        (void)z;
+        CHECK(!none.has_value());
     }
 
     // real commit map
@@ -212,6 +239,10 @@ static void test_typedb_and_render(const std::string& repo) {
     TypeDB db = TypeDB::from_file(db_path);
     CHECK(db.types.size() > 2000);
     CHECK(db.prototypes.size() > 2000);
+
+    // lightweight function-name loader (used for version pinning)
+    std::vector<std::string> fnames = TypeDB::load_function_names(db_path);
+    CHECK(fnames.size() > 2000);
 
     bool saw_str = false, saw_slice = false, saw_option = false, saw_result = false;
     for (const auto& [name, t] : db.types) {

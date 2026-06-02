@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -40,5 +41,16 @@ std::pair<std::optional<std::string>, int> identify_version_by_flirt(
     const std::vector<std::string>& sig_files,
     const std::function<int(const std::string&)>& count_fn,
     const std::string& probe_opt = "3");
+
+// Pin the rustc version when no version string is available, by overlap: choose
+// the candidate version whose type-DB function-name set shares the most names
+// with the (FLIRT-recovered, demangled) function names actually present in the
+// binary.  `names_for_version` returns a version's DB function names.  This is
+// timing-independent (pure set intersection) so it works headless.  Returns the
+// best version and its overlap count; version is nullopt if nothing overlaps.
+std::pair<std::optional<std::string>, int> pick_version_by_overlap(
+    const std::set<std::string>& recovered,
+    const std::vector<std::string>& candidate_versions,
+    const std::function<std::vector<std::string>(const std::string&)>& names_for_version);
 
 }  // namespace oxi

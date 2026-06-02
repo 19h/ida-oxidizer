@@ -94,6 +94,10 @@ public:
     static TypeDB from_file(const std::string& path, int arch_bits = 64);
     static TypeDB from_json(const JsonValue& data, int arch_bits = 64);
 
+    // Lightweight: return just the function names in a type-DB JSON file without
+    // parsing the (expensive) struct/enum graph.  Used for version pinning.
+    static std::vector<std::string> load_function_names(const std::string& path);
+
 private:
     std::map<std::string, const JsonValue*> struct_db_;
     std::set<std::string> pending_;
