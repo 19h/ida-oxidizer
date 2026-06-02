@@ -83,9 +83,12 @@ struct printer_t;
 class tinfo_t {
 public:
     bool is_func() const { return is_func_; }
+    int get_nargs() const { return nargs_; }
     bool is_func_ = false;
+    int nargs_ = -1;
 };
 til_t* get_idati();
+bool get_tinfo(tinfo_t* tif, ea_t ea);
 int parse_decls(til_t* til, const char* input, printer_t* printer, int hti_flags);
 bool parse_decl(tinfo_t* out, qstring* out_name, til_t* til, const char* decl, int pt_flags);
 bool apply_tinfo(ea_t ea, const tinfo_t& tif, uint32 flags);

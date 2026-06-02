@@ -24,6 +24,7 @@
 #include <auto.hpp>
 #include <diskio.hpp>
 #include <bytes.hpp>
+#include <nalt.hpp>
 #include <fpro.h>
 #include <strlist.hpp>
 
@@ -40,6 +41,7 @@
 #include "core/version_id.h"
 
 #ifdef OXIDIZER_WITH_HEXRAYS
+#include <hexrays.hpp>
 #include "ida/idiom_hooks.h"
 #endif
 
@@ -163,6 +165,34 @@ struct TypeStats {
     size_t types_declared = 0;
 };
 
+// Best-effort argument count for a function: prefer any prototype IDA already
+// holds; otherwise (when Hex-Rays is present) fall back to the decompiler's
+// inferred prototype.  Returns -1 if unknown.
+int inferred_argcount(ea_t ea) {
+    tinfo_t cur;
+    if (get_tinfo(&cur, ea) && cur.is_func()) {
+        int n = cur.get_nargs();
+        if (n >= 0) return n;
+    }
+#ifdef OXIDIZER_WITH_HEXRAYS
+    if (init_hexrays_plugin()) {
+        func_t* pfn = get_func(ea);
+        if (pfn != nullptr) {
+            hexrays_failure_t hf;
+            cfuncptr_t cf = decompile(pfn, &hf, DECOMP_NO_WAIT);
+            if (cf != nullptr) {
+                tinfo_t ft;
+                if (cf->get_func_type(&ft)) {
+                    int n = ft.get_nargs();
+                    if (n >= 0) return n;
+                }
+            }
+        }
+    }
+#endif
+    return -1;
+}
+
 TypeStats apply_type_db(const std::string& version, const RenameStats& names) {
     TypeStats ts;
     std::string path = type_db_path(version);
@@ -192,10 +222,29 @@ TypeStats apply_type_db(const std::string& version, const RenameStats& names) {
         msg("[oxidizer] parse_decls reported %d issue(s) while loading std types\n", herr);
     }
 
-    // Apply recovered prototypes to matching functions.  Apply when the name's
-    // prototypes are unambiguous -- either a single prototype, or several that
-    // render to the same C declaration (common for monomorphisations that share a
-    // signature).  Mirrors Oxidizer's "confident" path while covering more names.
+    // Cache: parse a C prototype string into a tinfo_t once.
+    std::map<std::string, tinfo_t> proto_cache;
+    auto parse_proto = [&](const std::string& cdecl_str, tinfo_t& out) -> bool {
+        auto cit = proto_cache.find(cdecl_str);
+        if (cit != proto_cache.end()) {
+            out = cit->second;
+            return out.is_func();
+        }
+        tinfo_t tif;
+        bool ok = parse_decl(&tif, nullptr, til, cdecl_str.c_str(), PT_SIL) && tif.is_func();
+        proto_cache[cdecl_str] = tif;
+        out = tif;
+        return ok;
+    };
+
+    // Apply recovered prototypes to matching functions:
+    //  * unambiguous name (single prototype, or several rendering identically)
+    //    -> apply to every matching address;
+    //  * ambiguous name (genuinely distinct monomorphisation prototypes)
+    //    -> negotiate per address: pick the candidate whose argument count
+    //       uniquely matches the one IDA/Hex-Rays inferred for that function.
+    // Both paths are provably safe: a prototype is only applied when the DB
+    // determines a single correct signature for that address.
     for (const auto& kv : db.prototypes) {
         const std::string& fname = kv.first;
         const std::vector<oxi::RustFnProto>& protos = kv.second;
@@ -204,23 +253,39 @@ TypeStats apply_type_db(const std::string& version, const RenameStats& names) {
         auto it = names.by_demangled.find(fname);
         if (it == names.by_demangled.end()) continue;
 
-        std::string cdecl_str = renderer.render_prototype(protos[0], "f");
-        bool unambiguous = true;
-        for (size_t i = 1; i < protos.size(); ++i) {
-            if (renderer.render_prototype(protos[i], "f") != cdecl_str) {
-                unambiguous = false;
-                break;
+        // Distinct rendered prototypes, each remembering its argument count.
+        std::vector<std::pair<std::string, int>> distinct;  // (cdecl, argcount)
+        for (const auto& p : protos) {
+            std::string cd = renderer.render_prototype(p, "f");
+            bool seen = false;
+            for (const auto& d : distinct) {
+                if (d.first == cd) { seen = true; break; }
             }
+            if (!seen) distinct.emplace_back(cd, static_cast<int>(p.args.size()));
         }
-        if (!unambiguous) continue;
 
-        tinfo_t tif;
-        if (!parse_decl(&tif, nullptr, til, cdecl_str.c_str(), PT_SIL)) continue;
-        if (!tif.is_func()) continue;
-
-        for (ea_t ea : it->second) {
-            if (apply_tinfo(ea, tif, TINFO_DEFINITE)) {
-                ++ts.prototypes_applied;
+        if (distinct.size() == 1) {
+            tinfo_t tif;
+            if (!parse_proto(distinct[0].first, tif)) continue;
+            for (ea_t ea : it->second) {
+                if (apply_tinfo(ea, tif, TINFO_DEFINITE)) ++ts.prototypes_applied;
+            }
+        } else {
+            // Negotiate per address by the inferred argument count.
+            for (ea_t ea : it->second) {
+                int nargs = inferred_argcount(ea);
+                if (nargs < 0) continue;
+                const std::string* chosen = nullptr;
+                for (const auto& d : distinct) {
+                    if (d.second == nargs) {
+                        if (chosen != nullptr && *chosen != d.first) { chosen = nullptr; break; }
+                        chosen = &d.first;
+                    }
+                }
+                if (chosen == nullptr) continue;  // no unique candidate
+                tinfo_t tif;
+                if (!parse_proto(*chosen, tif)) continue;
+                if (apply_tinfo(ea, tif, TINFO_DEFINITE)) ++ts.prototypes_applied;
             }
         }
     }

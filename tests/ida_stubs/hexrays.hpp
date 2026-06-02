@@ -36,7 +36,16 @@ struct cfunc_t {
     cinsn_t body;
     void set_user_cmt(const treeloc_t& loc, const char* cmt);
     void save_user_cmts();
+    bool get_func_type(tinfo_t* t) const;
 };
+
+#define DECOMP_NO_WAIT 0x04
+struct hexrays_failure_t {
+    int code = 0;
+    ea_t errea = BADADDR;
+};
+typedef cfunc_t* cfuncptr_t;
+cfuncptr_t decompile(func_t* pfn, hexrays_failure_t* hf, int flags);
 
 struct ctree_visitor_t {
     explicit ctree_visitor_t(int flags) { (void)flags; }
