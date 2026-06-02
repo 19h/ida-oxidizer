@@ -13,7 +13,7 @@ both portable and genuinely useful is ported here:
 | Capability | Status | How |
 |---|---|---|
 | **Rust symbol demangling** (legacy `_ZN` + v0 `_R`) | ✅ | self-contained demangler + Oxidizer's `normalize()` |
-| **rustc version identification** | ✅ | embedded `/rustc/<commit>/` + `rustc X.Y.Z` strings → 151k-entry commit map |
+| **rustc version identification** | ✅ | embedded `/rustc/<commit>/` + `rustc X.Y.Z` strings → 151k-entry commit map; **falls back** to all-versions FLIRT + type-DB name-overlap pinning when the version/commit is unknown (stripped builds, nightlies) |
 | **Function renaming** to demangled Rust paths | ✅ | `set_name` over every function |
 | **`no-return` marking** of panic/abort helpers | ✅ | huge decompiler-output cleanup (kills dead code after `unwrap`/bounds checks) |
 | **Std type recovery** (structs/enums/`Option`/`Result`/slices/`&str`) | ✅ | per-version type DB → byte-exact C types → IDA local types |
@@ -227,6 +227,11 @@ identified. It is a research-grade effort, not a wiring task.
   (FLIRT already named all drop glue); unverifiable benefit.
 - *Normalized-name prototype fallback* — can mis-type a differently-instantiated
   generic; not provably correct.
-- *FLIRT-scoring version fallback* — blocked headless: IDA defers signature
-  application past the in-event `auto_wait`, so per-candidate match counts read
-  0. (The scoring algorithm itself is ported and unit-tested in `core/`.)
+- *FLIRT-scoring version fallback (per-candidate dry-run counts)* — blocked
+  headless: IDA defers signature application past the in-event `auto_wait`, so
+  per-candidate `get_idasgn_desc` counts read 0. **Superseded** by a working
+  approach: apply *all* versions' FLIRT at once (byte-precise → only the real
+  version fires), then pin the version by type-DB function-name overlap with the
+  recovered names — timing-independent, so it works headless. This makes the
+  whole pipeline robust to unknown/stripped versions (the common
+  `version=(unknown)` failure), at the cost of a slower first analysis.
