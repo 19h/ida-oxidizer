@@ -390,15 +390,18 @@ int apply_all_flirt() {
     qstring proc = inf_get_procname();
     std::string subdir = (proc == "metapc" || proc.empty()) ? "pc" : std::string(proc.c_str());
     std::string sigdir = std::string(idadir(SIG_SUBDIR)) + "/" + subdir;
+    const char* sets[] = {"flirt_sigs", "flirt_sigs_no_inline"};
     const char* opts[] = {"3", "2", "1", "0"};
     for (const auto& ver : list_db_versions()) {
-        for (const char* opt : opts) {
-            std::string src = data_dir() + "/flirt_sigs/" + ver + "-O" + opt + ".sig";
-            if (!file_readable(src)) continue;
-            std::string sig_name = "oxi_flirt_sigs_" + ver + "_O" + opt + ".sig";
-            std::string dst = sigdir + "/" + sig_name;
-            if (!file_readable(dst) && !copy_file(src, dst)) continue;  // stage once, then reuse
-            if (plan_to_apply_idasgn(sig_name.c_str()) != 0) ++planned;
+        for (const char* set : sets) {
+            for (const char* opt : opts) {
+                std::string src = data_dir() + "/" + set + "/" + ver + "-O" + opt + ".sig";
+                if (!file_readable(src)) continue;
+                std::string sig_name = std::string("oxi_") + set + "_" + ver + "_O" + opt + ".sig";
+                std::string dst = sigdir + "/" + sig_name;
+                if (!file_readable(dst) && !copy_file(src, dst)) continue;  // stage once, then reuse
+                if (plan_to_apply_idasgn(sig_name.c_str()) != 0) ++planned;
+            }
         }
     }
     return planned;
