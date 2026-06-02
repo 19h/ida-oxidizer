@@ -191,3 +191,42 @@ The core is exhaustively self-checked:
   a comment (exact size, approximate interior).
 - **FLIRT staging** copies signatures into IDA's `sig/` dir, which must be
   writable; otherwise apply the signatures manually.
+
+## Capability ledger (exhaustive port audit)
+
+Oxidizer's ~55 Rust-decompilation capabilities were audited one-by-one against
+this plugin and the IDA/Hex-Rays SDK. Every capability falls into exactly one
+bucket below — so the set of things that remain portable-but-unbuilt is bounded
+and explicit.
+
+**Ported & verified (this plugin):** Rust symbol/FLIRT recovery, demangling
+(legacy + v0 + `j_` thunks) + normalization, function renaming, panic/abort
+`no-return` marking, per-version type-DB struct/enum materialisation, function
+prototype application (with dedup + Hex-Rays arg-count negotiation), version
+identification (embedded commit/string), Hex-Rays idiom annotation.
+
+**Redundant with IDA/Hex-Rays (~16):** e.g. FLIRT propagation, struct-memory
+layout, combo-register rewrites, unreachable/redundant-block removal, variable
+isolation, call-expression extraction — IDA's own analysis already does these.
+
+**Architecturally blocked (5)** — require Hex-Rays' *closed* microcode→C
+structurer/printer or extensible ctree nodes, which no plugin can reach:
+Pattern-match/enum recovery, Struct Builder (struct-from-stores rewriting),
+struct-return enum/variant simplification, the show-family macro renderer, and
+the Typehoon type back-translator (real-Rust output).
+
+**Remaining portable frontier (not built):** per-function calling-convention /
+prototype *inference* for arbitrary user functions (Option/Result/retbuf/by-ref
+synthesis). This is implementable in principle (it acts before the closed ctree)
+but requires porting Oxidizer's AIL dataflow fact-collector onto Hex-Rays
+microcode — the "rewrite, not port" cost the original feasibility study
+identified. It is a research-grade effort, not a wiring task.
+
+**Attempted, then reverted (kept the port provably correct):**
+- *Cleanup-function call-graph propagation* — recovered 0 on the test corpus
+  (FLIRT already named all drop glue); unverifiable benefit.
+- *Normalized-name prototype fallback* — can mis-type a differently-instantiated
+  generic; not provably correct.
+- *FLIRT-scoring version fallback* — blocked headless: IDA defers signature
+  application past the in-event `auto_wait`, so per-candidate match counts read
+  0. (The scoring algorithm itself is ported and unit-tested in `core/`.)
